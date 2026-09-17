@@ -1,15 +1,13 @@
-﻿from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Form
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
-from typing import List, Optional
 import os
 import datetime
-import shutil
-import tempfile
-import docx
 import json
 import re
+import subprocess
 import google.generativeai as genai
+import docx
 from diet_engine import load_default_plan, apply_adjustments
 from docx_generator import generate_patient_diet_docx
 
@@ -19,6 +17,9 @@ OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outp
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 MASTER_PLAN_TXT = os.path.join(DATA_DIR, "master_meal_plan.txt")
+
+PATIENTS_DIR = r"C:\Users\Gobran_Group\OneDrive\Patients"
+BACKUP_DIR = r"C:\Users\Gobran_Group\OneDrive\Back-up Diet Plan"
 
 class GenerateRequest(BaseModel):
     patient_name: str
@@ -36,7 +37,14 @@ def extract_plan_from_docx(filepath):
         days_data = []
         day_names = ['السبت', 'الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة']
         
-        for t_idx, t in enumerate(doc.tables[:7]):
+        # Filter to only include actual diet tables (skip intro/header tables)
+        valid_tables = []
+        for t in doc.tables:
+            # A diet table usually has at least 2 rows (header + meal) and 4 columns
+            if len(t.rows) > 1 and len(t.rows[0].cells) >= 4:
+                valid_tables.append(t)
+                
+        for t_idx, t in enumerate(valid_tables[:7]):
             day_info = {
                 'day': day_names[t_idx] if t_idx < len(day_names) else f'Day {t_idx+1}',
                 'meals': []
@@ -46,14 +54,17 @@ def extract_plan_from_docx(filepath):
                 meal_type = cells[1] if len(cells) > 1 else ''
                 timing = cells[2] if len(cells) > 2 else ''
                 diet_content = cells[3] if len(cells) > 3 else ''
-                day_info['meals'].append({
-                    'meal_type': meal_type,
-                    'timing': timing,
-                    'content': diet_content
-                })
-            days_data.append(day_info)
+                # Only add if it looks like a real meal row
+                if meal_type or diet_content:
+                    day_info['meals'].append({
+                        'meal_type': meal_type,
+                        'timing': timing,
+                        'content': diet_content
+                    })
+            if day_info['meals']:
+                days_data.append(day_info)
         
-        if len(days_data) >= 7:
+        if len(days_data) == 7:
             return days_data
     except Exception as e:
         print("Error parsing old diet docx tables:", e)
@@ -66,34 +77,68 @@ def get_master_plan_text():
             return f.read()
     return ""
 
+@app.get("/api/pick-file")
+def pick_file():
+    script = f"""
+import tkinter as tk
+from tkinter import filedialog
+import sys
+root = tk.Tk()
+root.withdraw()
+root.attributes('-topmost', True)
+res = filedialog.askopenfilename(initialdir=r'{PATIENTS_DIR}', filetypes=[("Word Documents", "*.docx")])
+print(res)
+"""
+    try:
+        res = subprocess.check_output(['python', '-c', script], text=True, stderr=subprocess.DEVNULL).strip()
+        return {"path": res}
+    except:
+        return {"path": ""}
+
+@app.get("/api/pick-folder")
+def pick_folder():
+    script = f"""
+import tkinter as tk
+from tkinter import filedialog
+import sys
+root = tk.Tk()
+root.withdraw()
+root.attributes('-topmost', True)
+res = filedialog.askdirectory(initialdir=r'{BACKUP_DIR}')
+print(res)
+"""
+    try:
+        res = subprocess.check_output(['python', '-c', script], text=True, stderr=subprocess.DEVNULL).strip()
+        return {"path": res}
+    except:
+        return {"path": ""}
+
 @app.post("/api/analyze-patient")
 async def analyze_patient(
     api_key: str = Form(None), 
-    info_file: UploadFile = File(None),
-    diet_file: UploadFile = File(None)  # Changed to accept single latest file from frontend
+    info_path: str = Form(None),
+    diet_folder_path: str = Form(None)
 ):
     try:
         if not api_key:
             return {"success": False, "error": "يرجى إدخال مفتاح Gemini API Key في أعلى الصفحة."}
-        if not info_file:
-            return {"success": False, "error": "يرجى اختيار ملف بيانات المريض أولاً."}
+        if not info_path or not os.path.exists(info_path):
+            return {"success": False, "error": "مسار ملف بيانات المريض غير صحيح أو الملف غير موجود."}
 
         genai.configure(api_key=api_key)
-        temp_dir = tempfile.gettempdir()
         
-        info_filename = os.path.basename(info_file.filename or "uploaded.docx")
-        info_path = os.path.join(temp_dir, "info_" + info_filename)
-        with open(info_path, "wb") as buffer:
-            shutil.copyfileobj(info_file.file, buffer)
-            
         old_diet_path = None
-        
-        if diet_file and diet_file.filename.endswith('.docx'):
-            latest_diet_filename = os.path.basename(diet_file.filename)
-            old_diet_path = os.path.join(temp_dir, "diet_" + latest_diet_filename)
-            print("Processing latest diet file:", latest_diet_filename)
-            with open(old_diet_path, "wb") as buffer:
-                shutil.copyfileobj(diet_file.file, buffer)
+        if diet_folder_path and os.path.isdir(diet_folder_path):
+            latest_file = None
+            max_time = 0
+            for f in os.listdir(diet_folder_path):
+                if f.endswith('.docx') and not f.startswith('~$'):
+                    full_p = os.path.join(diet_folder_path, f)
+                    mtime = os.path.getmtime(full_p)
+                    if mtime > max_time:
+                        max_time = mtime
+                        latest_file = full_p
+            old_diet_path = latest_file
             
         raw_text = extract_all_text(info_path)
         
@@ -109,7 +154,9 @@ async def analyze_patient(
                 formatted_day["meals"].append({
                     "meal_type": m["meal_type"],
                     "timing": m["timing"],
-                    "original_content": m.get("content", "")
+                    "original_content": m.get("content", ""),
+                    "suggested_content": "",
+                    "hint": ""
                 })
             formatted_base_plan.append(formatted_day)
             
@@ -118,7 +165,7 @@ async def analyze_patient(
         model = genai.GenerativeModel('gemini-3.6-flash')
         prompt = f"""
 أنت مساعد ذكي ومحترف لدكتور تغذية.
-إليك النص الخام المستخرج من ملف المريض (يحتوي على بياناته والـ Complaint أو تعليمات الدكتور):
+إليك النص الخام المستخرج من ملف المريض (يحتوي على بياناته وتاريخ جلساته والـ Complaint أو تعليمات الدكتور):
 "{raw_text}"
 
 وإليك خطة الوجبات (JSON) للدايت القديم للمريض:
@@ -131,17 +178,19 @@ async def analyze_patient(
 ========================
 
 التعليمات الهامة بدقة:
-1. ابحث في نص المريض عن أحدث جلسة زمنياً واستخرج تاريخها، ثم استخرج "الشكوى / التعديلات" الخاصة بها.
-2. استخرج "اسم المريض".
-3. بالنسبة للوجبات: اقرأ `original_content`. المطلوب منك هو توفير **قائمة من 3 إلى 5 اقتراحات (بدائل مكافئة)** لكل وجبة.
-4. يجب أن يتم استخراج هذه الاقتراحات حصراً من [قاعدة بيانات الماستر بلان] وتكون متوافقة مع جوهر الدايت والشكوى. (مثلاً إذا كانت الشكوى خالية من الكارب، اختر فقط البدائل الخالية من الكارب).
-5. لكل اقتراح تقوم بوضعه، يجب أن تملأ حقل `content` (وهو محتوى الوجبة المقترحة)، وحقل `source` (مكانها الدقيق مثل: 'الماستر بلان: جدول رقم X، صف Y').
+1. استخرج "اسم المريض".
+2. ابحث في نص المريض واستخرج بيانات **آخر 5 جلسات** زمنياً (تاريخ كل جلسة والشكوى/الملاحظات الخاصة بها).
+3. بالنسبة للوجبات: وفر **من 3 إلى 5 اقتراحات (بدائل)** لكل وجبة رئيسية.
+4. **كيفية عمل الاقتراحات (هام جداً):** الاقتراحات يجب أن تكون **شبه الوجبة الأصلية** في الهيكل. يجب عليك الحفاظ على "الثوابت" الموجودة في الدايت القديم (مثل: عبارة "2 كوب ماء قبل الأكل"، "سلطات"، "خضار سوتيه" أو أي إضافات ثابتة). قم **فقط بتغيير المكون الرئيسي** (مثل تبديل الدجاج باللحم أو السمك أو الكوردون بلو) واستخرج هذا المكون البديل من [قاعدة بيانات الماستر بلان]. 
+5. يجب أن تكون البدائل مكافئة في القيمة الغذائية وتتوافق مع الشكوى. ولكل بديل املأ `content` (النص النهائي بعد دمج المكون الجديد مع الثوابت القديمة) و `source` (مكان المكون في الماستر بلان).
+6. **احذّر من نسيان أي يوم:** يجب أن يكون الرد يحتوي على **الـ 7 أيام كاملة بالترتيب (تبدأ من السبت وتنتهي بالجمعة)** دون حذف أي يوم أو أي وجبة.
 
 أخرج الرد بصيغة JSON فقط، مطابق لهذا الهيكل بالضبط:
 {{
   "patient_name": "اسم المريض المستخرج",
-  "last_session_date": "تاريخ أحدث جلسة مستخرج",
-  "last_complaint": "نص شكوى الجلسة الأخيرة فقط",
+  "recent_sessions": [
+    {{ "date": "تاريخ الجلسة", "notes": "الشكوى والتفاصيل" }}
+  ],
   "suggested_plan": [
     {{
       "day": "السبت",
@@ -152,7 +201,7 @@ async def analyze_patient(
           "original_content": "...",
           "suggestions": [
              {{ "content": "محتوى الاقتراح الأول", "source": "جدول رقم X، صف Y" }},
-             {{ "content": "محتوى الاقتراح الثاني", "source": "جدول رقم X، صف Z" }}
+             {{ "content": "محتوى الاقتراح الثاني (بروتين مختلف للروتين)", "source": "جدول رقم X، صف Z" }}
           ]
         }}
       ]
@@ -173,20 +222,13 @@ async def analyze_patient(
         return {
             "success": True,
             "patient_name": ai_data.get("patient_name", ""),
-            "last_session_date": ai_data.get("last_session_date", ""),
-            "complaint": ai_data.get("last_complaint", ""),
+            "recent_sessions": ai_data.get("recent_sessions", []),
             "suggested_plan": ai_data.get("suggested_plan", [])
         }
     except Exception as e:
         import traceback
         traceback.print_exc()
         return {"success": False, "error": str(e)}
-    finally:
-        try:
-            if 'info_path' in locals() and os.path.exists(info_path): os.remove(info_path)
-            if 'old_diet_path' in locals() and old_diet_path and os.path.exists(old_diet_path): os.remove(old_diet_path)
-        except:
-            pass
 
 @app.get("/api/default-plan")
 def get_default_plan():
@@ -200,25 +242,34 @@ def generate_doc(req: GenerateRequest):
     plan_date = req.plan_date.strip() or datetime.date.today().strftime("%d-%m-%Y")
     
     plan_to_use = []
-    for day in req.weekly_plan:
-        new_day = {"day": day["day"], "meals": []}
-        for m in day["meals"]:
-            new_day["meals"].append({
-                "meal_type": m["meal_type"],
-                "timing": m["timing"],
-                "content": m.get("selected_content", m.get("original_content", ""))
-            })
-        plan_to_use.append(new_day)
+    if req.weekly_plan:
+        for day in req.weekly_plan:
+            new_day = {"day": day.get("day", ""), "meals": []}
+            for m in day.get("meals", []):
+                new_day["meals"].append({
+                    "meal_type": m.get("meal_type", ""),
+                    "timing": m.get("timing", ""),
+                    "content": m.get("selected_content", m.get("original_content", "")),
+                    "source": m.get("selected_source", "")
+                })
+            plan_to_use.append(new_day)
     
     if not plan_to_use:
         plan_to_use = load_default_plan()
     
+    import time
+    unique_id = str(int(time.time()))[-5:]
     safe_name = "".join(c for c in req.patient_name if c.isalnum() or c in (' ', '-', '_')).strip()
-    filename = f"{safe_name} - {plan_date}.docx"
+    filename = f"{safe_name}_{plan_date}_{unique_id}.docx"
     filepath = os.path.join(OUTPUT_DIR, filename)
     
-    generate_patient_diet_docx(req.patient_name, plan_date, plan_to_use, filepath)
-    
+    try:
+        generate_patient_diet_docx(req.patient_name, plan_date, plan_to_use, filepath)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"فشل في استخراج الملف: {str(e)}")
+        
     return {
         "success": True,
         "filename": filename,
@@ -230,7 +281,16 @@ def generate_doc(req: GenerateRequest):
 def download_file(filename: str):
     path = os.path.join(OUTPUT_DIR, filename)
     if os.path.exists(path):
-        return FileResponse(path, filename=filename, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        return FileResponse(
+            path, 
+            filename=filename, 
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0"
+            }
+        )
     raise HTTPException(status_code=404, detail="File not found")
 
 @app.get("/", response_class=HTMLResponse)
