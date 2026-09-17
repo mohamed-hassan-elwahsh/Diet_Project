@@ -1,0 +1,13 @@
+﻿__pycache__/
+*.pyc
+
+# Ignore root docx files (patient data & huge master plan)
+/*.docx
+
+# Ignore output generated files
+output/*
+!output/.gitkeep
+
+# Ignore temp folders if any
+temp/
+.env
