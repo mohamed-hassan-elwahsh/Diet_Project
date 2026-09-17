@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8">
@@ -124,7 +124,8 @@
         <p>المساعد الذكي الاحترافي لتحليل شكوى المرضى وتوليد الجداول أوتوماتيكياً</p>
       </div>
       <div>
-        <button class="settings-btn" onclick="openSettings()">⚙️ الإعدادات</button>
+        <button class="settings-btn" style="background: #ecfdf5; color: #059669; border-color: #6ee7b7; margin-left: 10px; display: inline-flex;" onclick="syncMasterPlan()">🔄 مزامنة الماستر بلان</button>
+        <button class="settings-btn" style="display: inline-flex;" onclick="openSettings()">⚙️ الإعدادات</button>
       </div>
     </header>
 
@@ -225,6 +226,25 @@
     }
     function openSettings() { document.getElementById('settingsModal').style.display = 'flex'; }
     function closeSettings() { document.getElementById('settingsModal').style.display = 'none'; }
+    
+    function syncMasterPlan() {
+        document.getElementById('loaderText').innerText = "جاري قراءة الماستر بلان...";
+        document.getElementById('loader').style.display = 'flex';
+        fetch('/api/sync-master', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('loader').style.display = 'none';
+            if(data.success) {
+                alert(data.message);
+            } else {
+                alert('حدث خطأ: ' + data.error);
+            }
+        })
+        .catch(err => {
+            document.getElementById('loader').style.display = 'none';
+            alert('حدث خطأ في الاتصال: ' + err.message);
+        });
+    }
 
     async function triggerFilePicker() {
         document.getElementById('infoFileName').style.display = 'inline-block';

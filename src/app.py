@@ -8,7 +8,13 @@ import re
 import subprocess
 import google.generativeai as genai
 import docx
-from diet_engine import load_default_plan, apply_adjustments
+import traceback
+
+def load_default_plan():
+    path = os.path.join(DATA_DIR, "default_weekly_plan.json")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 from docx_generator import generate_patient_diet_docx
 
 app = FastAPI(title="Diet Assistant AI")
@@ -181,8 +187,11 @@ async def analyze_patient(
 1. استخرج "اسم المريض".
 2. ابحث في نص المريض واستخرج بيانات **آخر 5 جلسات** زمنياً (تاريخ كل جلسة والشكوى/الملاحظات الخاصة بها).
 3. بالنسبة للوجبات: وفر **من 3 إلى 5 اقتراحات (بدائل)** لكل وجبة رئيسية.
-4. **كيفية عمل الاقتراحات (هام جداً):** الاقتراحات يجب أن تكون **شبه الوجبة الأصلية** في الهيكل. يجب عليك الحفاظ على "الثوابت" الموجودة في الدايت القديم (مثل: عبارة "2 كوب ماء قبل الأكل"، "سلطات"، "خضار سوتيه" أو أي إضافات ثابتة). قم **فقط بتغيير المكون الرئيسي** (مثل تبديل الدجاج باللحم أو السمك أو الكوردون بلو) واستخرج هذا المكون البديل من [قاعدة بيانات الماستر بلان]. 
-5. يجب أن تكون البدائل مكافئة في القيمة الغذائية وتتوافق مع الشكوى. ولكل بديل املأ `content` (النص النهائي بعد دمج المكون الجديد مع الثوابت القديمة) و `source` (مكان المكون في الماستر بلان).
+4. **قواعد الثوابت (هام جداً):** 
+   - **وجبة الإفطار والمشروب الصباحي:** يجب أن تكون ثابتة وموحدة في الـ 7 أيام (نفس الإفطار ونفس المشروب يتكرر كل يوم).
+   - **الماء:** يجب تثبيت جملة شرب الماء (مثل: "2 كوب ماء قبل وجبة الإفطار مباشرة"، أو الغداء، أو العشاء) وعدم حذفها أبداً من أي بديل.
+   - **الدمج الذكي لباقي الوجبات:** حافظ على الثوابت (مثل: المشروبات، الماء، السلطات). إذا وجدت وجبة ممتازة في الماستر بلان ولكن مشروبها مختلف، **خذ الوجبة الأساسية فقط من الماستر بلان، وضع معها المشروب الثابت والماء من الدايت القديم**. باختصار: غيّر "المكون الرئيسي للوجبة" فقط.
+5. يجب أن تكون البدائل مكافئة في القيمة الغذائية وتتوافق مع الشكوى. ولكل بديل املأ `content` (النص النهائي بعد الدمج) و `source` (مكان المكون في الماستر بلان).
 6. **احذّر من نسيان أي يوم:** يجب أن يكون الرد يحتوي على **الـ 7 أيام كاملة بالترتيب (تبدأ من السبت وتنتهي بالجمعة)** دون حذف أي يوم أو أي وجبة.
 
 أخرج الرد بصيغة JSON فقط، مطابق لهذا الهيكل بالضبط:
@@ -301,6 +310,37 @@ def index():
             return f.read()
     return "<h1>Diet Assistant App</h1>"
 
-if __name__ == "__main__":
+@app.post("/api/sync-master")
+def sync_master_plan():
+    """Reads the master docx from OneDrive and updates the local txt database."""
+    master_docx_path = r"C:\Users\Gobran_Group\OneDrive\Meal Plan.docx"
+    
+    if not os.path.exists(master_docx_path):
+        return {"success": False, "error": f"لم يتم العثور على ملف الماستر بلان في المسار: {master_docx_path}"}
+        
+    try:
+        import docx
+        doc = docx.Document(master_docx_path)
+        extracted_text = []
+        for t_idx, table in enumerate(doc.tables):
+            extracted_text.append(f"--- جدول {t_idx + 1} ---")
+            for r_idx, row in enumerate(table.rows):
+                row_data = []
+                for c_idx, cell in enumerate(row.cells):
+                    text = cell.text.strip().replace('\n', ' ')
+                    if text:
+                        row_data.append(f"عمود {c_idx + 1}: {text}")
+                if row_data:
+                    extracted_text.append(f"صف {r_idx + 1}: " + " | ".join(row_data))
+            extracted_text.append("")
+            
+        with open(MASTER_PLAN_TXT, "w", encoding="utf-8") as f:
+            f.write("\n".join(extracted_text))
+            
+        return {"success": True, "message": "تم تحديث قاعدة البيانات بنجاح من ملف الماستر بلان الخاص بك!"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
